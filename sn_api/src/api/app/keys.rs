@@ -28,10 +28,7 @@ impl Safe {
 
     // Create a SafeKey allocating token from current client's key onto it,
     // and return the SafeKey's XOR-URL
-    pub async fn keys_create_and_preload(
-        &self,
-        preload_amount: &str,
-    ) -> Result<(String, Keypair)> {
+    pub async fn keys_create_and_preload(&self, preload_amount: &str) -> Result<(String, Keypair)> {
         let amount = parse_coins_amount(preload_amount)?;
         let new_keypair = self.generate_random_ed_keypair();
 
@@ -95,9 +92,15 @@ impl Safe {
     }
 
     // Check SafeKey's balance from the network from a given SecretKey string
-    pub async fn keys_balance_from_sk(&self, secret_key: SecretKey) -> Result<String> {
+    pub async fn keys_balance_from_sk(&self, secret_key: &SecretKey) -> Result<String> {
         let keypair = match secret_key {
-            SecretKey::Ed25519(sk) => Keypair::from(sk),
+            SecretKey::Ed25519(sk) => {
+                let bytes = sk.to_bytes();
+                let secret_key = ed25519_dalek::SecretKey::from_bytes(&bytes).map_err(|err| {
+                    Error::InvalidInput(format!("Error parsing SecretKey bytes: {}", err))
+                })?;
+                Keypair::from(secret_key)
+            }
             SecretKey::BlsShare(_) => {
                 return Err(Error::InvalidInput(
                     "Cannot convert from BlsShare key to a Keypair".to_string(),
@@ -113,21 +116,13 @@ impl Safe {
     // Check SafeKey's balance from the network from a given XOR/NRS-URL and secret key string.
     // The difference between this and 'keys_balance_from_sk' function is that this will additionally
     // check that the XOR/NRS-URL corresponds to the public key derived from the provided secret key
-    pub async fn keys_balance_from_url(
-        &self,
-        url: &str,
-        secret_key: SecretKey,
-    ) -> Result<String> {
+    pub async fn keys_balance_from_url(&self, url: &str, secret_key: SecretKey) -> Result<String> {
         self.validate_sk_for_url(&secret_key, url).await?;
-        self.keys_balance_from_sk(secret_key).await
+        self.keys_balance_from_sk(&secret_key).await
     }
 
     // Check that the XOR/NRS-URL corresponds to the public key derived from the provided client id
-    pub async fn validate_sk_for_url(
-        &self,
-        secret_key: &SecretKey,
-        url: &str,
-    ) -> Result<String> {
+    pub async fn validate_sk_for_url(&self, secret_key: &SecretKey, url: &str) -> Result<String> {
         let derived_xorname = match secret_key {
             SecretKey::Ed25519(sk) => {
                 let pk: ed25519_dalek::PublicKey = sk.into();
@@ -286,7 +281,7 @@ mod tests {
         let (_, keypair) = safe
             .keys_create_and_preload_from_sk_string(&from_sk_hex, preload_amount)
             .await?;
-        let balance = safe.keys_balance_from_sk(keypair.secret_key()?).await?;
+        let balance = safe.keys_balance_from_sk(&keypair.secret_key()?).await?;
         assert_eq!(balance, preload_amount);
         Ok(())
     }
@@ -377,7 +372,7 @@ mod tests {
         let safe = new_safe_instance().await?;
         let preload_amount = "1.154200000";
         let (_, keypair) = safe.keys_create_preload_test_coins(preload_amount).await?;
-        let current_balance = safe.keys_balance_from_sk(keypair.secret_key()?).await?;
+        let current_balance = safe.keys_balance_from_sk(&keypair.secret_key()?).await?;
         assert_eq!(preload_amount, current_balance);
         Ok(())
     }
@@ -472,14 +467,14 @@ mod tests {
             .await?;
 
         let from_current_balance = safe
-            .keys_balance_from_sk(from_keypair.secret_key()?)
+            .keys_balance_from_sk(&from_keypair.secret_key()?)
             .await?;
         assert_eq!(
             "3.234000000", /*== 1743.234 - 1740 */
             from_current_balance
         );
 
-        let to_current_balance = safe.keys_balance_from_sk(to_keypair.secret_key()?).await?;
+        let to_current_balance = safe.keys_balance_from_sk(&to_keypair.secret_key()?).await?;
         assert_eq!(amount, to_current_balance);
         Ok(())
     }
@@ -606,9 +601,9 @@ mod tests {
             Err(msg) => Err(anyhow!("Transfer was expected to succeed: {}", msg)),
             Ok(_) => {
                 let from_current_balance =
-                    safe.keys_balance_from_sk(keypair2.secret_key()?).await?;
+                    safe.keys_balance_from_sk(&keypair2.secret_key()?).await?;
                 assert_eq!("0.100000000", from_current_balance);
-                let to_current_balance = safe.keys_balance_from_sk(keypair1.secret_key()?).await?;
+                let to_current_balance = safe.keys_balance_from_sk(&keypair1.secret_key()?).await?;
                 assert_eq!("100.900000000", to_current_balance);
                 Ok(())
             }
@@ -640,7 +635,7 @@ mod tests {
             Err(msg) => Err(anyhow!("Transfer was expected to succeed: {}", msg)),
             Ok(_) => {
                 let from_current_balance =
-                    safe.keys_balance_from_sk(keypair2.secret_key()?).await?;
+                    safe.keys_balance_from_sk(&keypair2.secret_key()?).await?;
                 assert_eq!(
                     "4097.580000000", /* 4621.45 - 523.87 */
                     from_current_balance
@@ -676,10 +671,10 @@ mod tests {
             )
             .await?;
 
-        let from_current_balance = safe.keys_balance_from_sk(keypair1.secret_key()?).await?;
+        let from_current_balance = safe.keys_balance_from_sk(&keypair1.secret_key()?).await?;
         assert_eq!("0.000000000" /* 0.2 - 0.2 */, from_current_balance);
 
-        let to_current_balance = safe.keys_balance_from_sk(keypair2.secret_key()?).await?;
+        let to_current_balance = safe.keys_balance_from_sk(&keypair2.secret_key()?).await?;
         assert_eq!("0.300000000" /* 0.1 + 0.2 */, to_current_balance);
 
         Ok(())
@@ -699,10 +694,10 @@ mod tests {
             .keys_transfer("0.111", Some(&from_sk1_hex), &to_pk2_hex)
             .await?;
 
-        let from_current_balance = safe.keys_balance_from_sk(keypair1.secret_key()?).await?;
+        let from_current_balance = safe.keys_balance_from_sk(&keypair1.secret_key()?).await?;
         assert_eq!("0.025000000" /* 0.136 - 0.111 */, from_current_balance);
 
-        let to_current_balance = safe.keys_balance_from_sk(keypair2.secret_key()?).await?;
+        let to_current_balance = safe.keys_balance_from_sk(&keypair2.secret_key()?).await?;
         assert_eq!("0.841000000" /* 0.73 + 0.111 */, to_current_balance);
 
         Ok(())
